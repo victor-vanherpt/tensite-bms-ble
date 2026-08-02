@@ -17,6 +17,7 @@ import struct
 
 import pytest
 
+from tensite_bms_ble.const import SERIAL_LENGTH
 from tensite_bms_ble.protocol import (
     ParseStats,
     build_request,
@@ -25,6 +26,7 @@ from tensite_bms_ble.protocol import (
     decode_cells,
     decode_is_master,
     decode_model,
+    decode_topology,
     decode_summary,
     decode_temperatures,
     is_sentinel_temperature,
@@ -587,3 +589,61 @@ class TestDecodeAlarmBits:
         from tensite_bms_ble.const import KEYSTREAM
 
         assert _mask(self.HEALTHY) == KEYSTREAM[:8]
+
+
+class TestTopology:
+    """Type 0x32: a count byte followed by that many 19-byte serials.
+
+    The layout is the app's own -- RTTopology.setData at 0x90423c multiplies
+    the count byte by 19 and requires count*19+1 to fit -- and the short form
+    confirms it without circularity, since decoding it needs only keystream
+    bytes that were derived from cell voltages.
+    """
+
+    #: Real 20-byte frame from 1417607SLKOPGG08051, masked as captured.
+    SHORT = _mask(b"\x01" + b"1417607SLKOPGG08051")
+
+    def test_short_frame_is_the_sender_announcing_itself(self):
+        topology = decode_topology(self.SHORT)
+        assert topology.count == 1
+        assert topology.serials == ("1417607SLKOPGG08051",)
+        assert topology.is_complete
+
+    def test_the_two_observed_sizes_are_exactly_the_formula(self):
+        """1 + 1*19 = 20 and 1 + 4*19 = 77, which is why those sizes appear."""
+        assert 1 + 1 * SERIAL_LENGTH == 20
+        assert 1 + 4 * SERIAL_LENGTH == 77
+
+    def test_a_bank_roster_reports_its_count_even_when_unreadable(self):
+        """The count is a header byte, so it survives the keystream running out.
+
+        Only 39 keystream bytes are known, which covers the count and the first
+        two entries of a four-entry roster. The rest are omitted rather than
+        guessed -- deriving keystream from assumed serials and then using it to
+        "confirm" those serials would prove nothing.
+        """
+        plain = b"\x04" + b"1417725SLKOPGG08146" * 4
+        topology = decode_topology(_mask(plain))
+        assert topology.count == 4
+        assert len(topology.serials) == 2      # as far as the keystream reaches
+        assert not topology.is_complete
+
+    def test_too_short_is_rejected(self):
+        """The app refuses anything under 20 bytes; so do we."""
+        with pytest.raises(ValueError):
+            decode_topology(_mask(b"\x01" + b"short"))
+
+    def test_an_implausible_count_is_flagged(self):
+        """Eight batteries is the documented maximum for this hardware.
+
+        A larger count means the frame was misread, not that someone wired up
+        a hundred, so it is worth being able to tell.
+        """
+        assert decode_topology(_mask(b"\x01" + b"1417607SLKOPGG08051")).is_plausible
+        big = decode_topology(_mask(bytes([99]) + b"1417607SLKOPGG08051"))
+        assert big.count == 99
+        assert not big.is_plausible
+
+    def test_the_observed_bank_is_within_the_hardware_limit(self):
+        plain = b"\x04" + b"1417725SLKOPGG08146" * 4
+        assert decode_topology(_mask(plain)).is_plausible

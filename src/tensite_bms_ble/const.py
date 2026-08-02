@@ -87,9 +87,13 @@ TYPE_TEMPERATURES = 0x21
 #: ASCII model/firmware string, e.g. "AB4850/100_2.0".
 TYPE_MODEL = 0x24
 
-#: 20-byte form is 0x01 + the serial in ASCII. 77-byte form starts with the
-#: serial twice and then carries data we have not decoded.
-TYPE_IDENTITY = 0x32
+#: Bank roster: a count byte followed by that many 19-byte ASCII serials.
+#: The app calls it RTTopology. Every battery sends a 20-byte form naming
+#: itself; the master also sends a 77-byte form listing the whole bank.
+TYPE_TOPOLOGY = 0x32
+
+#: Kept: this frame was called the identity frame before it was decoded.
+TYPE_IDENTITY = TYPE_TOPOLOGY
 
 #: Byte stuffing, HDLC-style with *two* flags. Both framing bytes are escaped
 #: by the value one below them, followed by a code:
@@ -160,6 +164,12 @@ KEYSTREAM = bytes.fromhex(
     "e6f8bbcbbc10ab6dca4953ac09844e0222c3a3056a3995a24a5d39877ebddc2c"
     "10b314abb69f52"
 )
+
+#: Largest bank the hardware supports, per the product documentation:
+#: up to eight batteries in series/parallel. Used only as a sanity bound --
+#: a decoded count above it means the payload is not what we think it is,
+#: not that the bank is too big.
+MAX_BATTERIES = 8
 
 CELL_COUNT = 16
 

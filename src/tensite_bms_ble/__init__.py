@@ -45,6 +45,7 @@ from .protocol import (
     Frame,
     ParseStats,
     Summary,
+    Topology,
     build_request,
     crc16_arc,
     decode_alarm_bits,
@@ -52,6 +53,7 @@ from .protocol import (
     decode_is_master,
     decode_routes,
     decode_model,
+    decode_topology,
     decode_summary,
     decode_temperatures,
     is_sentinel_temperature,
@@ -59,7 +61,7 @@ from .protocol import (
     unmask,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "ALARM_SLOTS",
@@ -81,6 +83,7 @@ __all__ = [
     "SERIAL_MARKER",
     "SERVICE_UUID",
     "Summary",
+    "Topology",
     "TensiteClusterClient",
     "TensiteError",
     "TensiteNoDataError",
@@ -93,6 +96,7 @@ __all__ = [
     "decode_is_master",
     "decode_routes",
     "decode_model",
+    "decode_topology",
     "decode_summary",
     "decode_temperatures",
     "is_sentinel_temperature",

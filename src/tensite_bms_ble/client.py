@@ -48,6 +48,7 @@ from .const import (
     TYPE_RELAY,
     TYPE_SUMMARY,
     TYPE_SWITCH,
+    TYPE_TOPOLOGY,
     TYPE_TEMPERATURES,
 )
 from .models import BatteryReading, ClusterReading
@@ -59,6 +60,7 @@ from .protocol import (
     decode_model,
     decode_routes,
     decode_summary,
+    decode_topology,
     decode_temperatures,
     parse_frames,
 )
@@ -260,6 +262,8 @@ class TensiteClusterClient:
         # Each battery's state is assembled from several frame types that
         # arrive independently, so accumulate per serial rather than replacing.
         parts: dict[str, dict[str, Any]] = {}
+        #: Highest battery count any topology frame claimed this session.
+        roster = [0]
         enough = asyncio.Event()
 
         def _on_notify(_sender: Any, data: bytearray) -> None:
@@ -287,6 +291,19 @@ class TensiteClusterClient:
                         part["model"] = decode_model(frame.payload)
                     elif frame.msg_type == TYPE_RELAY:
                         part["relay_routes"] = decode_routes(frame.payload)
+                    elif frame.msg_type == TYPE_TOPOLOGY:
+                        # The roster: how many batteries the sender knows of.
+                        # Only the master sends the long form. Recorded rather
+                        # than acted on -- see ClusterReading.roster_count.
+                        topology = decode_topology(frame.payload)
+                        if topology.count > roster[0]:
+                            roster[0] = topology.count
+                            self._logger.debug(
+                                "%s: topology says %d batteries (%s readable)",
+                                frame.serial,
+                                topology.count,
+                                len(topology.serials),
+                            )
                     elif frame.msg_type == TYPE_SWITCH:
                         # is_master comes from the position word, not from here:
                         # both agree, and position is present on every frame.
@@ -366,6 +383,7 @@ class TensiteClusterClient:
                 f"escape={stats.bad_escapes} truncated={stats.truncated}",
             )
         return ClusterReading(
+            roster_count=roster[0] or None,
             address=self.address,
             master_serial=master,
             batteries=batteries,

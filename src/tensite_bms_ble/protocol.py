@@ -35,6 +35,7 @@ from .const import (
     FRAME_START,
     HEADER_LEN,
     KEYSTREAM,
+    MAX_BATTERIES,
     MAX_PAYLOAD_LEN,
     MAX_ROUTES,
     POSITION_MASTER,
@@ -42,6 +43,7 @@ from .const import (
     PROTOCOL_VERSION,
     ROUTES_PER_BYTE,
     SERIAL_LENGTH,
+    SERIAL_MARKER,
     TEMPERATURE_SENTINELS,
     TEMPERATURE_OFFSET,
     TYPE_KEYSTREAM,
@@ -51,6 +53,7 @@ __all__ = [
     "Frame",
     "ParseStats",
     "Summary",
+    "Topology",
     "build_request",
     "crc16_arc",
     "decode_alarm_bits",
@@ -58,6 +61,7 @@ __all__ = [
     "decode_is_master",
     "decode_routes",
     "decode_model",
+    "decode_topology",
     "decode_summary",
     "decode_temperatures",
     "is_sentinel_temperature",
@@ -546,6 +550,84 @@ def decode_alarm_bits(payload: bytes) -> bytes:
     function stays raw so the unmodified field can be logged.
     """
     return unmask(payload)
+
+
+@dataclass(frozen=True, slots=True)
+class Topology:
+    """A type-0x32 frame: how many batteries the sender knows about, and who.
+
+    ``count`` is authoritative -- it is the frame's own header byte. ``serials``
+    may be shorter, because only the first 39 payload bytes can be unmasked;
+    see decode_topology().
+    """
+
+    count: int
+    serials: tuple[str, ...]
+
+    @property
+    def is_complete(self) -> bool:
+        """Whether every serial the frame claims could actually be read."""
+        return len(self.serials) == self.count
+
+    @property
+    def is_plausible(self) -> bool:
+        """Whether the count could describe a real bank.
+
+        The hardware supports at most eight batteries in series/parallel, so a
+        larger count means the frame was misread rather than that someone
+        wired up a hundred. Worth checking before trusting the number.
+        """
+        return 1 <= self.count <= MAX_BATTERIES
+
+
+def decode_topology(payload: bytes) -> Topology:
+    """Decode a type-0x32 payload: the roster of a bank.
+
+    The layout is the app's, from ``RTTopology.setData`` at 0x90423c, which is
+    unusually explicit about it::
+
+        cmp  x4, #0x14        ; refuse anything shorter than 20 bytes
+        ldrb w0, [x2, #0x17]  ; byte[0] = entry count
+        mov  x16, #0x13       ; 19 -- the serial length
+        mul  x5, x0, x16      ; count * 19
+        add  x6, x5, #1       ; count * 19 + 1 must fit in the payload
+
+    So it is a count byte followed by that many 19-byte ASCII serials, and the
+    two observed sizes are exactly ``1 + 1*19 = 20`` and ``1 + 4*19 = 77``.
+
+    Confirmed without circularity: three different batteries each send a
+    20-byte frame carrying ``count=1`` and their own serial, decoded with
+    keystream bytes that were derived from cell voltages rather than from any
+    assumption about this frame.
+
+    **The 77-byte form cannot be fully read.** Only 39 keystream bytes are
+    known, which covers the count and the first two entries; the remaining two
+    serials sit past the end. Extending the keystream *from this frame* would
+    be circular -- assume the serials, derive the keystream, then "confirm" the
+    serials -- and no other frame type is long enough to check an extension
+    against, since the longest is the 32-byte cell frame. So the entries that
+    can be read are returned and the rest are omitted rather than guessed.
+
+    Nothing needs them: every battery announces its own serial in the header of
+    every frame it sends, so the roster is already known by other means.
+    """
+    if len(payload) < 20:
+        raise ValueError(f"expected at least 20 bytes, got {len(payload)}")
+    plain = unmask(payload)
+    count = plain[0]
+
+    serials = []
+    for index in range(count):
+        start = 1 + index * SERIAL_LENGTH
+        end = start + SERIAL_LENGTH
+        if end > len(KEYSTREAM) or end > len(plain):
+            break  # past the readable keystream
+        serial = plain[start:end].decode("ascii", "replace")
+        if SERIAL_MARKER not in serial:
+            break  # not a serial, so the assumed layout has gone wrong
+        serials.append(serial)
+
+    return Topology(count=count, serials=tuple(serials))
 
 
 def decode_model(payload: bytes) -> str:

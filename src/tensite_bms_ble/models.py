@@ -328,6 +328,12 @@ class ClusterReading:
     master_serial: str | None
     batteries: dict[str, BatteryReading]
     #: What the parser rejected while building this reading.
+    #: Battery count claimed by a type-0x32 topology frame, if one arrived.
+    #: Authoritative about the *roster* -- how many batteries the master
+    #: knows of -- which is not the same as how many answered this poll.
+    #: None when no such frame was seen, which is the common case: only the
+    #: vendor app's own session has ever elicited the long form.
+    roster_count: int | None = None
     stats: ParseStats = field(default_factory=ParseStats)
     updated_at: datetime = field(
         default_factory=lambda: datetime.now(tz=timezone.utc)
@@ -511,6 +517,7 @@ def merge_readings(
     return ClusterReading(
         address=latest.address,
         master_serial=latest.master_serial or previous.master_serial,
+        roster_count=latest.roster_count or previous.roster_count,
         batteries=merged,
         stats=latest.stats,
         updated_at=latest.updated_at,
