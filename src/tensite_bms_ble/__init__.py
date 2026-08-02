@@ -59,7 +59,7 @@ from .protocol import (
     unmask,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "ALARM_SLOTS",
