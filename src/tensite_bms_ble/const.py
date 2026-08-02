@@ -45,13 +45,99 @@ MAX_PAYLOAD_LEN = 512
 PROTO_APP = 0x50  # app -> device
 PROTO_DEVICE = 0x10  # device -> app
 
-#: Carries 8 bytes of the XOR keystream. Emphatically *not* pack telemetry --
-#: decoding it as voltage/current/SOC yields a plausible-looking but entirely
-#: fictional reading that never changes.
-TYPE_KEYSTREAM = 0x01
+#: Pack telemetry: voltage, current, SOC, cell extremes, temperature extremes.
+TYPE_SUMMARY = 0x00
+
+#: Fault/alarm bitfield, 8 bytes. Every bit is zero in a healthy pack, which
+#: is precisely why this frame looked like something else for so long: its
+#: *masked* bytes are then identical to the keystream, and reading them as
+#: pack telemetry produced a plausible-looking but entirely fictional value
+#: that never changed. The keystream was recoverable from it exactly because
+#: the plaintext is zero.
+TYPE_ALARM = 0x01
+
+#: Kept as an alias: the request frame the vendor app sends uses this same
+#: message type, and build_request() addresses it.
+TYPE_KEYSTREAM = TYPE_ALARM
+
+#: Relay states -- the vendor app's "Relay"/"Relé" tab. One byte per four
+#: routes, two bits each. The app registers this as message 0x1002 -> RTRelay.
+#: Constant 0x01 in every capture (route 1 active, routes 2-4 not).
+TYPE_RELAY = 0x02
+
+#: Alias: this was read as a heartbeat before the message registry identified
+#: it, and the name is kept so existing callers keep working.
+TYPE_HEARTBEAT = TYPE_RELAY
+
+#: Switch states -- the app's "Switching value"/"Valor de conmutación" tab.
+#: Same layout as TYPE_RELAY; message 0x1003 -> RTSwitch. Reads 0xFF on the
+#: bank master (all four routes = 3) and 0x00 on the others, which is why this
+#: doubles as the master/slave indicator -- see decode_is_master().
+TYPE_SWITCH = 0x03
+
+#: Alias for the master/slave use of the switch frame.
+TYPE_ROLE = TYPE_SWITCH
 
 #: 16 x uint16 BE cell millivolts, XOR-obfuscated.
 TYPE_CELLS = 0x05
+
+#: One byte per pack temperature sensor. Four or six depending on the model.
+TYPE_TEMPERATURES = 0x21
+
+#: ASCII model/firmware string, e.g. "AB4850/100_2.0".
+TYPE_MODEL = 0x24
+
+#: 20-byte form is 0x01 + the serial in ASCII. 77-byte form starts with the
+#: serial twice and then carries data we have not decoded.
+TYPE_IDENTITY = 0x32
+
+#: Byte stuffing, HDLC-style with *two* flags. Both framing bytes are escaped
+#: by the value one below them, followed by a code:
+#:
+#:     <prefix> 01  ->  prefix + 1   (the flag byte itself)
+#:     <prefix> 02  ->  prefix       (a literal escape byte)
+#:
+#: so 0x7E arrives as ``7D 01``, 0x5E as ``5D 01``, and literal 0x7D / 0x5D as
+#: ``7D 02`` / ``5D 02``.
+#:
+#: Getting the 0x5D half wrong is quietly catastrophic rather than noisy: the
+#: frame still looks well-formed, just shifted by a byte from the escape
+#: onward. Cell frames are the ones that suffer, because whether a payload
+#: contains a masked 0x5E depends on the actual cell voltage -- around
+#: 3355 mV every single cell frame contains one, and cell readings disappear
+#: entirely while every other frame type keeps working.
+ESCAPE_PREFIXES = frozenset({0x5D, 0x7D})
+ESCAPE_LITERAL = 0x02  # <prefix> 02 -> prefix
+ESCAPE_FLAG = 0x01  # <prefix> 01 -> prefix + 1
+
+#: Temperatures are a raw *unsigned* byte with a 50 degree offset, so the
+#: representable range is -50..205 C. Confirmed in the vendor app's machine
+#: code: RTTemperature.setData() stores the bytes raw, and the offset is applied
+#: only at display time (``sub x3, x1, #0x32``), which is the sole subtraction
+#: of 50 anywhere in the app.
+TEMPERATURE_OFFSET = 50
+
+#: Two decoded values are sentinels rather than measurements: raw 0x00 and 0x14.
+#: Both are reported verbatim, exactly as the vendor app displays them.
+#:
+#: What they *mean* stays an open question, and the app cannot answer it: its
+#: temperature page has no sentinel logic at all. It renders "-" only when a
+#: value is absent (the payload carried fewer temperatures than the page has
+#: rows) and otherwise prints raw-50 unconditionally. There is no comparison
+#: against 20, 30 or 50 and no -50/-30 constant anywhere in the binary. See
+#: is_sentinel_temperature().
+#:
+#: Note these are *specific values*, not "anything negative". A pack really can
+#: sit below freezing, and -5 C in winter is a measurement.
+TEMPERATURE_SENTINELS = frozenset({-50, -30})
+
+#: Current uses offset binary: 0x8000 is zero, above is discharge.
+CURRENT_ZERO = 0x8000
+
+#: Below this magnitude the pack is treated as idle rather than charging or
+#: discharging. The BMS reports current in 0.1 A steps, so anything under a
+#: couple of steps is measurement noise, not flow.
+IDLE_CURRENT_A = 0.3
 
 PROTOCOL_VERSION = 0x0207
 
@@ -66,8 +152,13 @@ POSITION_MASTER = 0x01A0
 #: Its first 8 bytes are exactly the "frozen" type-0x01 payload and its first 4
 #: the "type-0x51 nonce" -- those frames are the device handing out the key,
 #: which is why they never change.
+#: Bytes 32-38 were recovered separately, from the 77-byte type-0x32 frame:
+#: its plaintext begins with the device serial repeated twice, which is known
+#: plaintext to XOR against. Positions 0-31 derived that way match the value
+#: above exactly, which is a strong independent check on both.
 KEYSTREAM = bytes.fromhex(
     "e6f8bbcbbc10ab6dca4953ac09844e0222c3a3056a3995a24a5d39877ebddc2c"
+    "10b314abb69f52"
 )
 
 CELL_COUNT = 16
@@ -76,3 +167,15 @@ CELL_COUNT = 16
 #: suspicious decodes -- values outside it are still reported.
 CELL_MV_MIN = 2000
 CELL_MV_MAX = 3800
+
+#: Relay and switch frames pack four routes into every byte, two bits each, and
+#: the vendor app's model tops out at 16 named routes (Route1..Route16).
+ROUTES_PER_BYTE = 4
+MAX_ROUTES = 16
+
+#: The route value the app renders as active. Established by pairing the iOS
+#: capture with the screenshot taken from it: the master's relay frame reads
+#: 0x01 (route 1 = 1, routes 2-4 = 0) and the app's Relay tab highlights route 1
+#: alone. Values 0 and 3 both render unhighlighted, so only 1 is pinned; see
+#: decode_routes().
+ROUTE_ACTIVE = 1

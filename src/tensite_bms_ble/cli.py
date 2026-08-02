@@ -64,20 +64,37 @@ async def _resolve(
     )
 
 
+def _fmt(value, unit: str, spec: str = ".1f") -> str:
+    return "--" if value is None else f"{value:{spec}}{unit}"
+
+
 def _print_human(reading: ClusterReading) -> None:
     cluster = f"C{reading.cluster_id:02d}" if reading.cluster_id is not None else "?"
-    total = reading.total_voltage
     print(f"\n=== cluster {cluster} @ {reading.address} ===")
     print(
         f"{reading.battery_count} batteries   "
-        f"{total:.2f} V mean stack   "
-        f"{reading.min_cell_mv}-{reading.max_cell_mv} mV   "
-        f"delta {reading.delta_mv} mV"
+        f"{_fmt(reading.total_voltage, ' V', '.2f')}   "
+        f"{_fmt(reading.current, ' A')}   "
+        f"{_fmt(reading.power, ' W', '.0f')}   "
+        f"{_fmt(reading.soc, ' %')}"
+    )
+    print(
+        f"cells {reading.min_cell_mv}-{reading.max_cell_mv} mV "
+        f"(delta {reading.delta_mv} mV)   "
+        f"temps {_fmt(reading.min_temperature, ' C', 'd')} to "
+        f"{_fmt(reading.max_temperature, ' C', 'd')}"
     )
     for serial in sorted(reading.batteries):
         battery = reading.batteries[serial]
         marker = "  (master)" if battery.is_master else ""
-        print(f"\n{serial}  [{battery.position_label}]{marker}")
+        model = f"  {battery.model}" if battery.model else ""
+        print(f"\n{serial}  [{battery.position_label}]{marker}{model}")
+        print(
+            f"  {_fmt(battery.voltage, ' V', '.1f')}   "
+            f"{_fmt(battery.current, ' A')}   "
+            f"{_fmt(battery.power, ' W', '.0f')}   "
+            f"{_fmt(battery.soc, ' %')}"
+        )
         cells = battery.cell_voltages_mv
         for row in range(0, len(cells), 4):
             print(
@@ -87,12 +104,34 @@ def _print_human(reading: ClusterReading) -> None:
                     for n in range(row, min(row + 4, len(cells)))
                 )
             )
-        print(
-            f"  min {battery.min_cell_mv} mV   max {battery.max_cell_mv} mV   "
-            f"delta {battery.delta_mv} mV   sum {battery.total_voltage:.2f} V"
-        )
+        if cells:
+            print(
+                f"  cells {battery.min_cell_mv}-{battery.max_cell_mv} mV   "
+                f"delta {battery.delta_mv} mV   "
+                f"sum {_fmt(battery.cell_sum_voltage, ' V', '.2f')}"
+            )
+        if battery.temperatures:
+            shown = ", ".join(
+                "fault" if t is None else f"{t}C" for t in battery.temperatures
+            )
+            print(f"  pack temps: {shown}")
+        if battery.relay_routes:
+            print(
+                "  relays: "
+                + ", ".join(
+                    f"{n}={v}" for n, v in enumerate(battery.relay_routes, 1)
+                )
+            )
         if battery.implausible_cells:
             print(f"  !! implausible cells: {battery.implausible_cells}")
+        for slot, level in battery.active_alarms:
+            print(f"  !! {slot.category} -> {slot.label}: Level{level} Fault")
+        if battery.unmapped_alarm_bits:
+            # Bits outside the 29 the vendor app itself parses.
+            print(
+                f"  !! unrecognised alarm bits: "
+                f"0x{battery.unmapped_alarm_bits:016x}"
+            )
 
 
 def _to_dict(reading: ClusterReading) -> dict:
@@ -102,21 +141,53 @@ def _to_dict(reading: ClusterReading) -> dict:
         "master_serial": reading.master_serial,
         "updated_at": reading.updated_at.isoformat(),
         "battery_count": reading.battery_count,
-        "total_voltage": reading.total_voltage,
+        "voltage": reading.total_voltage,
+        "current": reading.current,
+        "power": reading.power,
+        "soc": reading.soc,
         "min_cell_mv": reading.min_cell_mv,
         "max_cell_mv": reading.max_cell_mv,
         "delta_mv": reading.delta_mv,
+        "min_temperature": reading.min_temperature,
+        "max_temperature": reading.max_temperature,
         "batteries": {
             serial: {
                 "position": battery.position,
                 "position_label": battery.position_label,
                 "is_master": battery.is_master,
+                "model": battery.model,
+                "voltage": battery.voltage,
+                "current": battery.current,
+                "power": battery.power,
+                "soc": battery.soc,
                 "cell_voltages_mv": list(battery.cell_voltages_mv),
                 "min_cell_mv": battery.min_cell_mv,
                 "max_cell_mv": battery.max_cell_mv,
                 "delta_mv": battery.delta_mv,
-                "total_voltage": battery.total_voltage,
+                "cell_sum_voltage": battery.cell_sum_voltage,
+                "temperatures": list(battery.temperatures),
+                "min_temperature": battery.min_temperature,
+                "max_temperature": battery.max_temperature,
+                "faulty_temperature_sensors": battery.faulty_temperature_sensors,
                 "implausible_cells": list(battery.implausible_cells),
+                "relay_routes": list(battery.relay_routes),
+                "switch_routes": list(battery.switch_routes),
+                "alarm_bits": battery.alarm_bits_hex,
+                "alarm_level": (
+                    int(battery.alarm_level)
+                    if battery.alarm_level is not None
+                    else None
+                ),
+                "active_alarms": [
+                    {
+                        "key": slot.key,
+                        "name": slot.name,
+                        "category": slot.category,
+                        "label": slot.label,
+                        "level": int(level),
+                    }
+                    for slot, level in battery.active_alarms
+                ],
             }
             for serial, battery in sorted(reading.batteries.items())
         },

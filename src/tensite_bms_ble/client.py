@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
+from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -40,10 +42,26 @@ from .const import (
     PROTO_DEVICE,
     REQUEST_CHAR,
     SERIAL_MARKER,
+    TYPE_ALARM,
     TYPE_CELLS,
+    TYPE_MODEL,
+    TYPE_RELAY,
+    TYPE_SUMMARY,
+    TYPE_SWITCH,
+    TYPE_TEMPERATURES,
 )
 from .models import BatteryReading, ClusterReading
-from .protocol import build_request, decode_cells, parse_frames
+from .protocol import (
+    ParseStats,
+    build_request,
+    decode_alarm_bits,
+    decode_cells,
+    decode_model,
+    decode_routes,
+    decode_summary,
+    decode_temperatures,
+    parse_frames,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +77,11 @@ __all__ = [
 #: A callable that returns a *connected* BleakClient. Supplied by the caller to
 #: override how connections are made; the default uses establish_connection.
 Connector = Callable[[BLEDevice], Awaitable[BleakClient]]
+
+
+def _complete(part: dict[str, Any]) -> bool:
+    """Whether a battery has reported everything a poll waits for."""
+    return bool(part.get("summary")) and bool(part.get("cell_voltages_mv"))
 
 
 class TensiteError(Exception):
@@ -233,31 +256,59 @@ class TensiteClusterClient:
         """
         timeout = listen_timeout if listen_timeout is not None else self._listen_timeout
         buffer = bytearray()
-        batteries: dict[str, BatteryReading] = {}
+        stats = ParseStats()
+        # Each battery's state is assembled from several frame types that
+        # arrive independently, so accumulate per serial rather than replacing.
+        parts: dict[str, dict[str, Any]] = {}
         enough = asyncio.Event()
 
         def _on_notify(_sender: Any, data: bytearray) -> None:
             buffer.extend(data)
-            for frame in parse_frames(buffer):
+            for frame in parse_frames(buffer, stats):
                 if frame.proto != PROTO_DEVICE or SERIAL_MARKER not in frame.serial:
                     continue
-                if frame.msg_type != TYPE_CELLS:
-                    continue
+                part = parts.setdefault(
+                    frame.serial, {"position": frame.position}
+                )
+                part["position"] = frame.position
                 try:
-                    cells = decode_cells(frame.payload)
-                except ValueError:
+                    if frame.msg_type == TYPE_CELLS:
+                        part["cell_voltages_mv"] = tuple(decode_cells(frame.payload))
+                        part["cells_updated_at"] = datetime.now(tz=timezone.utc)
+                    elif frame.msg_type == TYPE_SUMMARY:
+                        part["summary"] = decode_summary(frame.payload)
+                    elif frame.msg_type == TYPE_TEMPERATURES:
+                        part["temperatures"] = tuple(
+                            decode_temperatures(frame.payload)
+                        )
+                    elif frame.msg_type == TYPE_ALARM and len(frame.payload) == 8:
+                        part["alarm_bits"] = decode_alarm_bits(frame.payload)
+                    elif frame.msg_type == TYPE_MODEL:
+                        part["model"] = decode_model(frame.payload)
+                    elif frame.msg_type == TYPE_RELAY:
+                        part["relay_routes"] = decode_routes(frame.payload)
+                    elif frame.msg_type == TYPE_SWITCH:
+                        # is_master comes from the position word, not from here:
+                        # both agree, and position is present on every frame.
+                        part["switch_routes"] = decode_routes(frame.payload)
+                    else:
+                        continue
+                except (ValueError, IndexError, struct.error):
                     self._logger.debug(
-                        "%s: malformed cell payload (%d bytes), skipping",
+                        "%s: malformed type-0x%02x payload (%d bytes), skipping",
                         frame.serial,
+                        frame.msg_type,
                         len(frame.payload),
                     )
                     continue
-                batteries[frame.serial] = BatteryReading(
-                    serial=frame.serial,
-                    position=frame.position,
-                    cell_voltages_mv=tuple(cells),
-                )
-                if expect and len(batteries) >= expect:
+
+                # A battery only counts as complete once it has *both* the pack
+                # summary and its cells. Requiring only one of them exits far
+                # too early: type-0x00 summaries arrive several times more
+                # often than type-0x05 cell frames, so `expect` would be
+                # satisfied by summaries alone and return readings with no cell
+                # data at all.
+                if expect and sum(1 for p in parts.values() if _complete(p)) >= expect:
                     enough.set()
 
         client = await self._async_connect()
@@ -284,15 +335,39 @@ class TensiteClusterClient:
             except Exception:  # noqa: BLE001 -- ditto
                 self._logger.debug("%s: disconnect failed, ignoring", self.address)
 
+        # Partial batteries are still returned -- a unit that sent a summary but
+        # no cells before the timeout is more useful than nothing.
+        batteries = {
+            serial: BatteryReading(serial=serial, **part)
+            for serial, part in parts.items()
+            if part.get("summary") or part.get("cell_voltages_mv")
+        }
         if not batteries:
             raise TensiteNoDataError(
-                f"{self.address}: connected but no cell frames arrived within "
+                f"{self.address}: connected but no battery frames arrived within "
                 f"{timeout:.0f}s"
             )
 
         master = next(
             (s for s, b in batteries.items() if b.is_master), self._serial
         )
+        if stats.rejected:
+            # Not fatal on its own -- a truncated frame at the tail of a
+            # session is normal -- but a sustained ratio means the parser and
+            # the firmware disagree about framing, which this protocol hides
+            # well. Surfaced on the reading so callers can alert on it.
+            self._logger.debug(
+                "%s: %d/%d frame candidates rejected (%.1f%%): %s",
+                self.address,
+                stats.rejected,
+                stats.frames + stats.rejected,
+                stats.reject_ratio * 100,
+                f"crc={stats.crc_failures} len={stats.length_mismatches} "
+                f"escape={stats.bad_escapes} truncated={stats.truncated}",
+            )
         return ClusterReading(
-            address=self.address, master_serial=master, batteries=batteries
+            address=self.address,
+            master_serial=master,
+            batteries=batteries,
+            stats=stats,
         )

@@ -31,22 +31,56 @@ from .const import (
     SERIAL_MARKER,
     SERVICE_UUID,
 )
-from .models import BatteryReading, ClusterReading
-from .protocol import Frame, build_request, crc16_arc, decode_cells, parse_frames
+from .alarms import (
+    ALARM_SLOTS,
+    ALARM_SLOTS_BY_KEY,
+    AlarmLevel,
+    AlarmSlot,
+    active_alarms,
+    decode_alarms,
+    unmapped_bits,
+)
+from .models import BatteryReading, ClusterReading, merge_readings
+from .protocol import (
+    Frame,
+    ParseStats,
+    Summary,
+    build_request,
+    crc16_arc,
+    decode_alarm_bits,
+    decode_cells,
+    decode_is_master,
+    decode_routes,
+    decode_model,
+    decode_summary,
+    decode_temperatures,
+    is_sentinel_temperature,
+    parse_frames,
+    unmask,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
+    "ALARM_SLOTS",
+    "ALARM_SLOTS_BY_KEY",
+    "AlarmLevel",
+    "AlarmSlot",
+    "active_alarms",
+    "decode_alarms",
+    "unmapped_bits",
     "BatteryReading",
     "ClusterReading",
     "DiscoveredCluster",
     "Frame",
+    "ParseStats",
     "MANUFACTURER_DATA_START",
     "MANUFACTURER_ID",
     "NOTIFY_CHAR",
     "REQUEST_CHAR",
     "SERIAL_MARKER",
     "SERVICE_UUID",
+    "Summary",
     "TensiteClusterClient",
     "TensiteError",
     "TensiteNoDataError",
@@ -54,7 +88,16 @@ __all__ = [
     "async_discover_clusters",
     "build_request",
     "crc16_arc",
+    "decode_alarm_bits",
     "decode_cells",
+    "decode_is_master",
+    "decode_routes",
+    "decode_model",
+    "decode_summary",
+    "decode_temperatures",
+    "is_sentinel_temperature",
     "is_tensite_advertisement",
+    "merge_readings",
     "parse_frames",
+    "unmask",
 ]
