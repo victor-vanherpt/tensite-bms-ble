@@ -305,6 +305,7 @@ class TensiteClusterClient:
                         # both agree, and position is present on every frame.
                         part["switch_routes"] = decode_routes(frame.payload)
                     else:
+                        stats.note_unhandled(frame.msg_id)
                         continue
                 except (ValueError, IndexError, struct.error):
                     self._logger.debug(

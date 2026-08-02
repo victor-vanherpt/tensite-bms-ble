@@ -23,7 +23,7 @@ Frame layout, all offsets from the leading 0x5E::
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 from .const import (
@@ -109,6 +109,12 @@ class ParseStats:
     bad_escapes: int = 0
     #: A frame start appeared before the previous frame terminated.
     truncated: int = 0
+    #: Well-formed frames whose message id nothing here decodes, counted per
+    #: id. Not an error -- the device emits ids the vendor app ignores too, and
+    #: 0x1051 shows up a dozen times a session -- but silence is the wrong
+    #: default. A firmware update that starts sending something new should be
+    #: visible rather than dropped without trace.
+    unhandled: dict[int, int] = field(default_factory=dict)
 
     @property
     def rejected(self) -> int:
@@ -131,6 +137,11 @@ class ParseStats:
         self.length_mismatches += other.length_mismatches
         self.bad_escapes += other.bad_escapes
         self.truncated += other.truncated
+        for msg_id, count in other.unhandled.items():
+            self.unhandled[msg_id] = self.unhandled.get(msg_id, 0) + count
+
+    def note_unhandled(self, msg_id: int) -> None:
+        self.unhandled[msg_id] = self.unhandled.get(msg_id, 0) + 1
 
 
 @dataclass(frozen=True, slots=True)

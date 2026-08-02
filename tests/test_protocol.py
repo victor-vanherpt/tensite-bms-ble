@@ -725,3 +725,36 @@ class TestKeystreamGenerator:
     def test_unmask_is_its_own_inverse(self):
         payload = bytes(range(77))
         assert unmask(unmask(payload)) == payload
+
+
+class TestUnhandledFrames:
+    """Frames we do not decode should be counted, not silently dropped.
+
+    The device emits ids the vendor app ignores too -- 0x1051 turns up a dozen
+    times a session -- so this is not an error path. But a firmware update that
+    starts sending something new should leave a trace rather than vanish.
+    """
+
+    def test_counter_starts_empty(self):
+        assert ParseStats().unhandled == {}
+
+    def test_counts_per_id(self):
+        stats = ParseStats()
+        stats.note_unhandled(0x1051)
+        stats.note_unhandled(0x1051)
+        stats.note_unhandled(0x1099)
+        assert stats.unhandled == {0x1051: 2, 0x1099: 1}
+
+    def test_merges_across_polls(self):
+        a, b = ParseStats(), ParseStats()
+        a.note_unhandled(0x1051)
+        b.note_unhandled(0x1051)
+        b.note_unhandled(0x1099)
+        a.add(b)
+        assert a.unhandled == {0x1051: 2, 0x1099: 1}
+
+    def test_unhandled_is_not_counted_as_rejected(self):
+        """A frame we choose not to decode is not a parse failure."""
+        stats = ParseStats()
+        stats.note_unhandled(0x1051)
+        assert stats.rejected == 0
