@@ -148,27 +148,31 @@ PROTOCOL_VERSION = 0x0207
 #: Cluster 01 / position A0 -- the master. Requests are addressed here.
 POSITION_MASTER = 0x01A0
 
-#: The XOR keystream every payload is masked with. Recovered by XOR-ing a
-#: type-0x05 payload against the 16 cell voltages the vendor app displayed for
-#: the same battery at the same second. Constant across batteries, sessions and
-#: days.
+#: The payload mask is not a table -- it is a linear congruential generator,
+#: read out of the vendor app at ``Msg`` 0x9609ec::
 #:
-#: Its first 8 bytes are exactly the "frozen" type-0x01 payload and its first 4
-#: the "type-0x51 nonce" -- those frames are the device handing out the key,
-#: which is why they never change.
-#: Bytes 32-38 were recovered separately, from the 77-byte type-0x32 frame:
-#: its plaintext begins with the device serial repeated twice, which is known
-#: plaintext to XOR against. Positions 0-31 derived that way match the value
-#: above exactly, which is a strong independent check on both.
-KEYSTREAM = bytes.fromhex(
-    "e6f8bbcbbc10ab6dca4953ac09844e0222c3a3056a3995a24a5d39877ebddc2c"
-    "10b314abb69f52"
-)
+#:     msub x10, x12, x8, x9    ; state mod M
+#:     mul  x9,  x10, x6        ; * A
+#:     add  w10, w9,  w3        ; + C, truncated to 32 bits
+#:     lsr  w12, w10, #0x14     ; byte = state >> 20
+#:     and  x13, x12, x2        ;      & 0xFF
+#:
+#: Seeded at 0, it reproduces the mask exactly, which means there is no length
+#: limit: any payload can be unmasked, however long.
+#:
+#: This replaced a captured 39-byte table. Thirty-six of its bytes were right;
+#: the last three were wrong, because they had been derived from the topology
+#: frame on the assumption that its plaintext began with the sender's serial
+#: twice. It does not -- the second entry is the next battery in the bank, and
+#: those serials differ only in their final three characters. The generator
+#: settles it, and nothing had been decoded wrongly in practice because no
+#: other payload reaches 37 bytes.
+KEYSTREAM_MODULUS = 689854231
+KEYSTREAM_MULTIPLIER = 340100002
+KEYSTREAM_INCREMENT = 778321986
+KEYSTREAM_SHIFT = 20
+KEYSTREAM_SEED = 0
 
-#: Largest bank the hardware supports, per the product documentation:
-#: up to eight batteries in series/parallel. Used only as a sanity bound --
-#: a decoded count above it means the payload is not what we think it is,
-#: not that the bank is too big.
 MAX_BATTERIES = 8
 
 CELL_COUNT = 16

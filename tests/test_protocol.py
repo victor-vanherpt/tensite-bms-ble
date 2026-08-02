@@ -23,6 +23,7 @@ from tensite_bms_ble.protocol import (
     build_request,
     crc16_arc,
     decode_alarm_bits,
+    keystream,
     decode_cells,
     decode_is_master,
     decode_model,
@@ -586,9 +587,8 @@ class TestDecodeAlarmBits:
     def test_masked_healthy_payload_equals_the_keystream(self):
         """Why this frame was mistaken for keystream delivery: a zero plaintext
         masks to the keystream itself."""
-        from tensite_bms_ble.const import KEYSTREAM
-
-        assert _mask(self.HEALTHY) == KEYSTREAM[:8]
+        
+        assert _mask(self.HEALTHY) == keystream(64)[:8]
 
 
 class TestTopology:
@@ -614,19 +614,27 @@ class TestTopology:
         assert 1 + 1 * SERIAL_LENGTH == 20
         assert 1 + 4 * SERIAL_LENGTH == 77
 
-    def test_a_bank_roster_reports_its_count_even_when_unreadable(self):
-        """The count is a header byte, so it survives the keystream running out.
+    def test_a_full_bank_roster_decodes_completely(self):
+        """The real 77-byte frame, decoded end to end.
 
-        Only 39 keystream bytes are known, which covers the count and the first
-        two entries of a four-entry roster. The rest are omitted rather than
-        guessed -- deriving keystream from assumed serials and then using it to
-        "confirm" those serials would prove nothing.
+        This used to stop after two entries because the mask was a captured
+        39-byte table. It is generated now, so the whole roster comes out --
+        and the real capture yields the four batteries in position order,
+        which is how the last three bytes of the old table were found to be
+        wrong: the second entry is the *next* battery, not the sender again.
         """
-        plain = b"\x04" + b"1417725SLKOPGG08146" * 4
+        serials = [
+            "1417725SLKOPGG08146",
+            "1417725SLKOPGG08099",
+            "1417607SLKOPGG08313",
+            "1417607SLKOPGG08051",
+        ]
+        plain = b"\x04" + b"".join(s.encode() for s in serials)
         topology = decode_topology(_mask(plain))
         assert topology.count == 4
-        assert len(topology.serials) == 2      # as far as the keystream reaches
-        assert not topology.is_complete
+        assert list(topology.serials) == serials
+        assert topology.is_complete
+        assert topology.is_plausible
 
     def test_too_short_is_rejected(self):
         """The app refuses anything under 20 bytes; so do we."""
@@ -647,3 +655,46 @@ class TestTopology:
     def test_the_observed_bank_is_within_the_hardware_limit(self):
         plain = b"\x04" + b"1417725SLKOPGG08146" * 4
         assert decode_topology(_mask(plain)).is_plausible
+
+
+class TestKeystreamGenerator:
+    """The mask is generated, not a captured table.
+
+    Taken from the vendor app at Msg 0x9609ec -- a linear congruential
+    generator whose output byte is state >> 20. Pinning it here because the
+    constants are the whole thing: get one wrong and every payload decodes to
+    plausible-looking rubbish.
+    """
+
+    #: The first 36 bytes as originally captured. These were recovered by
+    #: XOR-ing a cell payload against the voltages the app displayed at the
+    #: same second, so they are ground truth, independent of the generator.
+    CAPTURED_PREFIX = bytes.fromhex(
+        "e6f8bbcbbc10ab6dca4953ac09844e0222c3a3056a3995a24a5d39877ebddc2c10b314ab"
+    )
+
+    def test_reproduces_the_captured_prefix(self):
+        assert keystream(len(self.CAPTURED_PREFIX)) == self.CAPTURED_PREFIX
+
+    def test_is_deterministic_and_prefix_stable(self):
+        """A longer request must extend the same sequence, not a new one."""
+        assert keystream(200)[:39] == keystream(39)
+
+    def test_has_no_length_limit(self):
+        """The 39-byte table is what made the topology frame look undecodable."""
+        assert len(keystream(1000)) == 1000
+
+    def test_corrects_the_three_bytes_the_old_table_had_wrong(self):
+        """The table's last three bytes came from a bad assumption.
+
+        They were derived from the topology frame by assuming its plaintext
+        began with the sender's serial twice. The second entry is actually the
+        next battery in the bank, and those serials differ only in their final
+        three characters -- exactly the three bytes that were wrong.
+        """
+        assert keystream(39)[36:] == bytes.fromhex("b7925d")
+        assert keystream(39)[36:] != bytes.fromhex("b69f52")
+
+    def test_unmask_is_its_own_inverse(self):
+        payload = bytes(range(77))
+        assert unmask(unmask(payload)) == payload

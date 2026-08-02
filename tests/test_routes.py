@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from tensite_bms_ble.const import KEYSTREAM, MAX_ROUTES, ROUTE_ACTIVE
+from tensite_bms_ble.const import MAX_ROUTES, ROUTE_ACTIVE
+from tensite_bms_ble.protocol import keystream
 from tensite_bms_ble.models import BatteryReading
 from tensite_bms_ble.protocol import decode_is_master, decode_routes
 
@@ -22,9 +23,9 @@ SWITCH_SLAVE_MASKED = bytes.fromhex("e6")  # -> 0x00
 
 def test_capture_fixtures_unmask_to_what_the_doc_records() -> None:
     """Guards the fixtures themselves against a keystream change."""
-    assert RELAY_MASKED[0] ^ KEYSTREAM[0] == 0x01
-    assert SWITCH_MASTER_MASKED[0] ^ KEYSTREAM[0] == 0xFF
-    assert SWITCH_SLAVE_MASKED[0] ^ KEYSTREAM[0] == 0x00
+    assert RELAY_MASKED[0] ^ keystream(1)[0] == 0x01
+    assert SWITCH_MASTER_MASKED[0] ^ keystream(1)[0] == 0xFF
+    assert SWITCH_SLAVE_MASKED[0] ^ keystream(1)[0] == 0x00
 
 
 def test_relay_matches_the_screenshot() -> None:
@@ -58,19 +59,19 @@ def test_one_byte_yields_exactly_four_routes() -> None:
 
 def test_routes_are_little_end_first_within_a_byte() -> None:
     """Route 1 is bits 0-1, route 4 is bits 6-7."""
-    masked = bytes([0b11_10_01_00 ^ KEYSTREAM[0]])
+    masked = bytes([0b11_10_01_00 ^ keystream(1)[0]])
     assert decode_routes(masked) == (0, 1, 2, 3)
 
 
 def test_four_bytes_give_all_sixteen_routes() -> None:
     plain = bytes([0b01_01_01_01] * 4)
-    masked = bytes(a ^ b for a, b in zip(plain, KEYSTREAM, strict=False))
+    masked = bytes(a ^ b for a, b in zip(plain, keystream(len(plain))))
     assert decode_routes(masked) == (1,) * MAX_ROUTES
 
 
 def test_never_reports_more_than_sixteen_routes() -> None:
     plain = bytes([0xFF] * 8)
-    masked = bytes(a ^ b for a, b in zip(plain, KEYSTREAM, strict=False))
+    masked = bytes(a ^ b for a, b in zip(plain, keystream(len(plain))))
     assert len(decode_routes(masked)) == MAX_ROUTES
 
 
@@ -80,7 +81,7 @@ def test_empty_payload_is_not_an_error() -> None:
 
 @pytest.mark.parametrize("value", [0, 1, 2, 3])
 def test_every_two_bit_value_survives_the_round_trip(value: int) -> None:
-    masked = bytes([value ^ KEYSTREAM[0]])
+    masked = bytes([value ^ keystream(1)[0]])
     assert decode_routes(masked)[0] == value
 
 

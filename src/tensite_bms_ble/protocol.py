@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+from functools import lru_cache
 
 from .const import (
     CELL_COUNT,
@@ -34,7 +35,11 @@ from .const import (
     FRAME_END,
     FRAME_START,
     HEADER_LEN,
-    KEYSTREAM,
+    KEYSTREAM_INCREMENT,
+    KEYSTREAM_MODULUS,
+    KEYSTREAM_MULTIPLIER,
+    KEYSTREAM_SEED,
+    KEYSTREAM_SHIFT,
     MAX_BATTERIES,
     MAX_PAYLOAD_LEN,
     MAX_ROUTES,
@@ -56,6 +61,7 @@ __all__ = [
     "Topology",
     "build_request",
     "crc16_arc",
+    "keystream",
     "decode_alarm_bits",
     "decode_cells",
     "decode_is_master",
@@ -145,16 +151,37 @@ class Frame:
         return unmask(self.payload)
 
 
-def unmask(payload: bytes) -> bytes:
-    """Strip the XOR keystream from a payload.
+@lru_cache(maxsize=8)
+def keystream(length: int) -> bytes:
+    """Generate *length* bytes of the payload mask.
 
-    Only the first ``len(KEYSTREAM)`` bytes can be recovered; anything beyond
-    that is returned untouched, because how the keystream continues past byte
-    38 is not yet known. In practice every decoded frame type is shorter than
-    this.
+    A linear congruential generator, taken from the vendor app rather than
+    guessed: ``state = ((state mod M) * A + C) mod 2**32``, emitting
+    ``(state >> 20) & 0xFF`` each round from a seed of 0. See the constants in
+    const.py for the disassembly it came from.
+
+    Cached because a handful of payload lengths recur constantly.
     """
-    n = min(len(payload), len(KEYSTREAM))
-    return bytes(a ^ b for a, b in zip(payload[:n], KEYSTREAM)) + payload[n:]
+    out = bytearray(length)
+    state = KEYSTREAM_SEED
+    for index in range(length):
+        state = (
+            (state % KEYSTREAM_MODULUS) * KEYSTREAM_MULTIPLIER
+            + KEYSTREAM_INCREMENT
+        ) & 0xFFFFFFFF
+        out[index] = (state >> KEYSTREAM_SHIFT) & 0xFF
+    return bytes(out)
+
+
+def unmask(payload: bytes) -> bytes:
+    """Strip the XOR mask from a payload.
+
+    Any length: the mask is generated rather than looked up in a captured
+    table, so there is no point past which bytes stop being recoverable. That
+    matters for the 77-byte topology frame, which is the only payload longer
+    than the 39 bytes that had ever been captured.
+    """
+    return bytes(a ^ b for a, b in zip(payload, keystream(len(payload))))
 
 
 def build_request(serial: str, position: int = POSITION_MASTER) -> bytes:
@@ -600,16 +627,9 @@ def decode_topology(payload: bytes) -> Topology:
     keystream bytes that were derived from cell voltages rather than from any
     assumption about this frame.
 
-    **The 77-byte form cannot be fully read.** Only 39 keystream bytes are
-    known, which covers the count and the first two entries; the remaining two
-    serials sit past the end. Extending the keystream *from this frame* would
-    be circular -- assume the serials, derive the keystream, then "confirm" the
-    serials -- and no other frame type is long enough to check an extension
-    against, since the longest is the 32-byte cell frame. So the entries that
-    can be read are returned and the rest are omitted rather than guessed.
-
-    Nothing needs them: every battery announces its own serial in the header of
-    every frame it sends, so the roster is already known by other means.
+    Every entry is readable. The mask is generated rather than looked up in a
+    captured table, so it does not run out partway through the 77-byte form --
+    which is what once made the last two serials look undecodable.
     """
     if len(payload) < 20:
         raise ValueError(f"expected at least 20 bytes, got {len(payload)}")
@@ -620,8 +640,8 @@ def decode_topology(payload: bytes) -> Topology:
     for index in range(count):
         start = 1 + index * SERIAL_LENGTH
         end = start + SERIAL_LENGTH
-        if end > len(KEYSTREAM) or end > len(plain):
-            break  # past the readable keystream
+        if end > len(plain):
+            break  # the frame is shorter than its own count claims
         serial = plain[start:end].decode("ascii", "replace")
         if SERIAL_MARKER not in serial:
             break  # not a serial, so the assumed layout has gone wrong
