@@ -30,10 +30,7 @@ from typing import Any
 from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
-from bleak_retry_connector import (
-    close_stale_connections_by_address,
-    establish_connection,
-)
+from bleak_retry_connector import establish_connection
 
 from .const import (
     DEFAULT_CONNECT_TIMEOUT,
@@ -233,15 +230,6 @@ class TensiteClusterClient:
             client = BleakClient(self._device, timeout=self._connect_timeout)
             await client.connect()
             return client
-
-        # Reap any connection left over from a previous read before opening a
-        # new one. Nothing else will: a caller polling on a timer gets no
-        # advertisement-driven housekeeping, and a connection that was not torn
-        # down cleanly stays counted against the adapter. On a small adapter
-        # that means three or four polls succeed and every one after fails with
-        # "the proxy/adapter is out of connection slots" until the process
-        # restarts, while the adapter itself is idle.
-        await close_stale_connections_by_address(self.address)
 
         return await establish_connection(
             BleakClient,
