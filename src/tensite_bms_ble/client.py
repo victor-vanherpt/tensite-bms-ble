@@ -39,17 +39,16 @@ from .const import (
     MANUFACTURER_ID,
     MIN_CONNECT_TIMEOUT,
     NOTIFY_CHAR,
-    PROTO_DEVICE,
+    MSG_CLASS_REALTIME,
     REQUEST_CHAR,
     SERIAL_MARKER,
-    TYPE_ALARM,
-    TYPE_CELLS,
-    TYPE_MODEL,
-    TYPE_RELAY,
-    TYPE_SUMMARY,
-    TYPE_SWITCH,
-    TYPE_TOPOLOGY,
-    TYPE_TEMPERATURES,
+    MSG_RT_ALARM,
+    MSG_RT_CELLS,
+    MSG_RT_RELAY,
+    MSG_RT_SUMMARY,
+    MSG_RT_SWITCH,
+    MSG_RT_TOPOLOGY,
+    MSG_RT_TEMPERATURES,
 )
 from .models import BatteryReading, ClusterReading
 from .protocol import (
@@ -57,7 +56,6 @@ from .protocol import (
     build_request,
     decode_alarm_bits,
     decode_cells,
-    decode_model,
     decode_routes,
     decode_summary,
     decode_topology,
@@ -269,29 +267,27 @@ class TensiteClusterClient:
         def _on_notify(_sender: Any, data: bytearray) -> None:
             buffer.extend(data)
             for frame in parse_frames(buffer, stats):
-                if frame.proto != PROTO_DEVICE or SERIAL_MARKER not in frame.serial:
+                if frame.msg_class != MSG_CLASS_REALTIME or SERIAL_MARKER not in frame.serial:
                     continue
                 part = parts.setdefault(
                     frame.serial, {"position": frame.position}
                 )
                 part["position"] = frame.position
                 try:
-                    if frame.msg_type == TYPE_CELLS:
+                    if frame.msg_id == MSG_RT_CELLS:
                         part["cell_voltages_mv"] = tuple(decode_cells(frame.payload))
                         part["cells_updated_at"] = datetime.now(tz=timezone.utc)
-                    elif frame.msg_type == TYPE_SUMMARY:
+                    elif frame.msg_id == MSG_RT_SUMMARY:
                         part["summary"] = decode_summary(frame.payload)
-                    elif frame.msg_type == TYPE_TEMPERATURES:
+                    elif frame.msg_id == MSG_RT_TEMPERATURES:
                         part["temperatures"] = tuple(
                             decode_temperatures(frame.payload)
                         )
-                    elif frame.msg_type == TYPE_ALARM and len(frame.payload) == 8:
+                    elif frame.msg_id == MSG_RT_ALARM and len(frame.payload) == 8:
                         part["alarm_bits"] = decode_alarm_bits(frame.payload)
-                    elif frame.msg_type == TYPE_MODEL:
-                        part["model"] = decode_model(frame.payload)
-                    elif frame.msg_type == TYPE_RELAY:
+                    elif frame.msg_id == MSG_RT_RELAY:
                         part["relay_routes"] = decode_routes(frame.payload)
-                    elif frame.msg_type == TYPE_TOPOLOGY:
+                    elif frame.msg_id == MSG_RT_TOPOLOGY:
                         # The roster: how many batteries the sender knows of.
                         # Only the master sends the long form. Recorded rather
                         # than acted on -- see ClusterReading.roster_count.
@@ -304,7 +300,7 @@ class TensiteClusterClient:
                                 topology.count,
                                 len(topology.serials),
                             )
-                    elif frame.msg_type == TYPE_SWITCH:
+                    elif frame.msg_id == MSG_RT_SWITCH:
                         # is_master comes from the position word, not from here:
                         # both agree, and position is present on every frame.
                         part["switch_routes"] = decode_routes(frame.payload)

@@ -42,58 +42,58 @@ HEADER_LEN = 36
 #: Sanity cap when trusting a declared payload length.
 MAX_PAYLOAD_LEN = 512
 
-PROTO_APP = 0x50  # app -> device
-PROTO_DEVICE = 0x10  # device -> app
+#: Bytes [1:3] are a single 16-bit message id, big-endian -- not a "protocol"
+#: byte followed by a type. The app's own registry proves it: every id it
+#: registers is the pair we had been reading as two fields, and the high byte
+#: sorts messages into classes.
+MSG_CLASS_REALTIME = 0x10  # device -> app telemetry
+MSG_CLASS_SETTING = 0x20  # configuration, read and write
+MSG_CLASS_FIRMWARE = 0x40  # "burning"
+MSG_CLASS_APP = 0x50  # app -> device
+MSG_CLASS_VENDOR = 0x70
 
 #: Pack telemetry: voltage, current, SOC, cell extremes, temperature extremes.
-TYPE_SUMMARY = 0x00
+MSG_RT_SUMMARY = 0x1000
 
-#: Fault/alarm bitfield, 8 bytes. Every bit is zero in a healthy pack, which
-#: is precisely why this frame looked like something else for so long: its
-#: *masked* bytes are then identical to the keystream, and reading them as
-#: pack telemetry produced a plausible-looking but entirely fictional value
-#: that never changed. The keystream was recoverable from it exactly because
-#: the plaintext is zero.
-TYPE_ALARM = 0x01
+#: Fault/alarm bitfield, 8 bytes. Every bit is zero in a healthy pack, which is
+#: precisely why this frame looked like something else for so long: its masked
+#: bytes are then identical to the mask itself.
+MSG_RT_ALARM = 0x1001
 
-#: Kept as an alias: the request frame the vendor app sends uses this same
-#: message type, and build_request() addresses it.
-TYPE_KEYSTREAM = TYPE_ALARM
+#: Relay states -- the app's "Relay"/"Relé" tab. Four routes, 2 bits each.
+MSG_RT_RELAY = 0x1002
 
-#: Relay states -- the vendor app's "Relay"/"Relé" tab. One byte per four
-#: routes, two bits each. The app registers this as message 0x1002 -> RTRelay.
-#: Constant 0x01 in every capture (route 1 active, routes 2-4 not).
-TYPE_RELAY = 0x02
+#: Switch states -- the app's "Switching value" tab. Same layout as the relay
+#: frame; reads 0xFF on the bank master and 0x00 on the others.
+MSG_RT_SWITCH = 0x1003
 
-#: Alias: this was read as a heartbeat before the message registry identified
-#: it, and the name is kept so existing callers keep working.
-TYPE_HEARTBEAT = TYPE_RELAY
-
-#: Switch states -- the app's "Switching value"/"Valor de conmutación" tab.
-#: Same layout as TYPE_RELAY; message 0x1003 -> RTSwitch. Reads 0xFF on the
-#: bank master (all four routes = 3) and 0x00 on the others, which is why this
-#: doubles as the master/slave indicator -- see decode_is_master().
-TYPE_SWITCH = 0x03
-
-#: Alias for the master/slave use of the switch frame.
-TYPE_ROLE = TYPE_SWITCH
-
-#: 16 x uint16 BE cell millivolts, XOR-obfuscated.
-TYPE_CELLS = 0x05
+#: 16 x uint16 BE cell millivolts.
+MSG_RT_CELLS = 0x1005
 
 #: One byte per pack temperature sensor. Four or six depending on the model.
-TYPE_TEMPERATURES = 0x21
-
-#: ASCII model/firmware string, e.g. "AB4850/100_2.0".
-TYPE_MODEL = 0x24
+MSG_RT_TEMPERATURES = 0x1021
 
 #: Bank roster: a count byte followed by that many 19-byte ASCII serials.
-#: The app calls it RTTopology. Every battery sends a 20-byte form naming
-#: itself; the master also sends a 77-byte form listing the whole bank.
-TYPE_TOPOLOGY = 0x32
+MSG_RT_TOPOLOGY = 0x1032
 
-#: Kept: this frame was called the identity frame before it was decoded.
-TYPE_IDENTITY = TYPE_TOPOLOGY
+#: Observed in captures (4 bytes, all zero) but not modelled. The app has an
+#: RT1051 class, but under a different protocol version, so what it means here
+#: is unknown and nothing depends on it.
+MSG_RT_1051 = 0x1051
+
+#: What the app sends to open a session: a keepalive carrying year, month, day,
+#: hour, minute and second. The app sends seven 0xFF bytes -- presumably "do
+#: not set the clock" -- where this library sends an empty payload, which the
+#: device accepts just as well.
+#:
+#: Note this is a *keepalive*, not a data request. Nothing here asks for
+#: telemetry; the device simply starts streaming, round-robin across the bank.
+MSG_LINK_TEST = 0x5001
+
+#: Deprecated aliases. Kept because the low byte alone is how these frames were
+#: identified before the id turned out to be 16 bits wide.
+PROTO_DEVICE = MSG_CLASS_REALTIME
+PROTO_APP = MSG_CLASS_APP
 
 #: Byte stuffing, HDLC-style with *two* flags. Both framing bytes are escaped
 #: by the value one below them, followed by a code:

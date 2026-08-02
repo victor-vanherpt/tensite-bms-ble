@@ -17,7 +17,14 @@ import struct
 
 import pytest
 
-from tensite_bms_ble.const import SERIAL_LENGTH
+from tensite_bms_ble.const import (
+    MSG_CLASS_APP,
+    MSG_CLASS_REALTIME,
+    MSG_LINK_TEST,
+    MSG_RT_ALARM,
+    MSG_RT_SUMMARY,
+    SERIAL_LENGTH,
+)
 from tensite_bms_ble.protocol import (
     ParseStats,
     build_request,
@@ -97,9 +104,29 @@ class TestBuildRequest:
         frames = parse_frames(bytearray(build_request(MASTER_SERIAL)))
         assert len(frames) == 1
         assert frames[0].serial == MASTER_SERIAL
-        assert frames[0].proto == 0x50
         assert frames[0].position == 0x01A0
         assert frames[0].payload == b""
+
+    def test_is_a_link_test_not_a_data_request(self):
+        """0x5001 is what the app's registry calls LinkTest -- a keepalive.
+
+        Worth pinning: it reads like a request for data and is not one. The
+        device streams on its own once the session is open, which is why a poll
+        waits rather than asks.
+        """
+        frame = parse_frames(bytearray(build_request(MASTER_SERIAL)))[0]
+        assert frame.msg_id == MSG_LINK_TEST
+        assert frame.msg_class == MSG_CLASS_APP
+        assert frame.payload == b""
+
+    def test_message_id_is_one_sixteen_bit_field(self):
+        """Not a protocol byte plus a type byte, which is how it was modelled.
+
+        The app's registry settles it: every id it registers is exactly the
+        pair those two bytes form.
+        """
+        frame = parse_frames(bytearray(build_request(MASTER_SERIAL)))[0]
+        assert frame.msg_id == (frame.msg_class << 8) | frame.msg_type
 
 
 class TestDecodeCells:

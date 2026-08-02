@@ -6,8 +6,8 @@ is fully testable without hardware.
 Frame layout, all offsets from the leading 0x5E::
 
     [0]      0x5E      start
-    [1]      proto     0x10 device->app, 0x50 app->device
-    [2]      msg_type
+    [1:3]    msg_id    16-bit BE; high byte is a class (0x10 realtime,
+                       0x20 setting, 0x40 firmware, 0x50 app->device)
     [3:22]   serial    19 bytes ASCII
     [22:24]  protocol version (0x0207)
     [24:26]  direction
@@ -39,19 +39,18 @@ from .const import (
     KEYSTREAM_MODULUS,
     KEYSTREAM_MULTIPLIER,
     KEYSTREAM_SEED,
+    MSG_LINK_TEST,
     KEYSTREAM_SHIFT,
     MAX_BATTERIES,
     MAX_PAYLOAD_LEN,
     MAX_ROUTES,
     POSITION_MASTER,
-    PROTO_APP,
     PROTOCOL_VERSION,
     ROUTES_PER_BYTE,
     SERIAL_LENGTH,
     SERIAL_MARKER,
     TEMPERATURE_SENTINELS,
     TEMPERATURE_OFFSET,
-    TYPE_KEYSTREAM,
 )
 
 __all__ = [
@@ -138,12 +137,22 @@ class ParseStats:
 class Frame:
     """One decoded frame off the notification stream."""
 
-    proto: int
-    msg_type: int
+    #: Bytes [1:3], big-endian. The high byte is a message class; see const.py.
+    msg_id: int
     serial: str
     position: int
     seq: int
     payload: bytes
+
+    @property
+    def msg_class(self) -> int:
+        """High byte of the id: realtime, setting, firmware, app."""
+        return self.msg_id >> 8
+
+    @property
+    def msg_type(self) -> int:
+        """Low byte. Only meaningful together with the class."""
+        return self.msg_id & 0xFF
 
     @property
     def plaintext(self) -> bytes:
@@ -187,15 +196,21 @@ def unmask(payload: bytes) -> bytes:
 def build_request(serial: str, position: int = POSITION_MASTER) -> bytes:
     """Build the vendor app's request frame verbatim.
 
-    Message type 0x01, empty payload, zero sequence and timestamp. The app
-    sends exactly one of these per session, addressed to the master's position.
+    This is message 0x5001, which the app's own registry names **LinkTest** --
+    a keepalive carrying a timestamp, not a request for data. Nothing in it
+    asks for telemetry; sending it opens the session and the device then
+    streams on its own, round-robin across the bank.
+
+    The app sends seven 0xFF bytes as its payload, presumably "do not set the
+    clock". An empty payload is sent here instead, which the device accepts
+    just as well -- every capture this library was built from used it.
     """
     if len(serial) != SERIAL_LENGTH:
         raise ValueError(
             f"serial must be {SERIAL_LENGTH} characters, got {len(serial)}: {serial!r}"
         )
     body = (
-        bytes([PROTO_APP, TYPE_KEYSTREAM])
+        struct.pack(">H", MSG_LINK_TEST)
         + serial.encode("ascii")
         + struct.pack(">H", PROTOCOL_VERSION)
         + b"\x00\x00"  # direction: app -> device
@@ -355,8 +370,7 @@ def _decode_frame(raw: bytes, stats: ParseStats | None = None) -> Frame | None:
 
     payload_at = HEADER_LEN - 1
     return Frame(
-        proto=body[0],
-        msg_type=body[1],
+        msg_id=struct.unpack_from(">H", body, 0)[0],
         serial=body[1 + 1 : 1 + 20].decode("ascii", "replace"),
         position=struct.unpack_from(">H", body, 25)[0],
         seq=struct.unpack_from(">H", body, 27)[0],
