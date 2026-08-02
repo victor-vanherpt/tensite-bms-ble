@@ -346,9 +346,12 @@ def decode_cells(payload: bytes) -> list[int]:
 class Summary:
     """Pack-level telemetry from a type-0x00 frame.
 
-    Field offsets were established by lining up captured frames against the
-    vendor app's Realtime Monitor at the same second; voltage, SOC and both
-    cell extremes match its display exactly.
+    Offsets were first established by lining up captured frames against the
+    vendor app's Realtime Monitor at the same second, and have since been
+    confirmed against the app's own parser (``RTSummary.setData`` at
+    0x909370): every field decoded here is read at the same offset and width
+    there. The field names below are the app's, taken from ``RTSummary
+    .toJson()``.
     """
 
     voltage: float  # V
@@ -364,6 +367,36 @@ class Summary:
     daily_charge_kwh: float
     daily_discharge_kwh: float
 
+    # --- fields the app parses whose *values* are not established -----------
+    #
+    # Decoded because the app decodes them, and reported raw because nothing
+    # observed pins what they mean. Every capture has the bank healthy, idle
+    # or discharging, and with no SD card fitted, so there is nothing to
+    # correlate against. See the module docs.
+
+    #: App field "Status", offset [6]. A pack status enum; only 0x00-0x02 seen.
+    #: Not the same thing as BatteryReading.status, which is derived from the
+    #: sign of the current.
+    status_raw: int | None = None
+    #: App field "SDStatus", offset [29]. Never non-zero in any capture, and
+    #: untestable on hardware without an SD slot.
+    sd_status: int | None = None
+    #: Which pack and cluster hold the extreme cell. The app pairs each of its
+    #: Index fields with a Packet and a Cluster, so an extreme identifies a
+    #: cell in a specific battery rather than a position in the abstract.
+    max_cell_packet: int | None = None
+    max_cell_cluster: int | None = None
+    min_cell_packet: int | None = None
+    min_cell_cluster: int | None = None
+    #: Same triple for the temperature extremes: which sensor, in which pack,
+    #: in which cluster.
+    max_temp_index: int | None = None
+    max_temp_packet: int | None = None
+    max_temp_cluster: int | None = None
+    min_temp_index: int | None = None
+    min_temp_packet: int | None = None
+    min_temp_cluster: int | None = None
+
     @property
     def power(self) -> float:
         """Signed power in watts, positive while discharging."""
@@ -373,52 +406,91 @@ class Summary:
 def decode_summary(payload: bytes) -> Summary:
     """Decode a type-0x00 payload.
 
-    Layout, after unmasking::
+    The layout is the vendor app's own, read out of ``RTSummary.setData`` at
+    0x909370 and named from ``RTSummary.toJson()``. Every offset we had already
+    inferred from captures is read at the same place there, so the two agree
+    completely; what the app added was the six fields we had listed as unknown.
 
-        [0:2]   uint16 BE  pack voltage      0.1 V
-        [2:4]   uint16 BE  current           offset binary at 0x8000, 0.1 A
-        [4:6]   uint16 BE  state of charge   0.1 %
-        [6]                unknown, constant 0x02
-        [7:9]   uint16 BE  highest cell      mV
-        [9:11]  uint16 BE  lowest cell       mV
-        [11]               unknown, varies
-        [17]    uint8      highest pack temperature, 50 C offset
-        [18]    uint8      lowest pack temperature, 50 C offset
-        [25:27] uint16 BE  energy charged today       0.1 kWh
-        [27:29] uint16 BE  energy discharged today    0.1 kWh
+    ==========  =====  ==================  ====================================
+    offset      width  app field           meaning
+    ==========  =====  ==================  ====================================
+    ``[0:2]``   u16BE  Voltage             pack voltage, 0.1 V
+    ``[2:4]``   u16BE  Current             offset binary at 0x8000, 0.1 A
+    ``[4:6]``   u16BE  SOC                 state of charge, 0.1 %
+    ``[6]``     u8     Status              pack status enum, values unknown
+    ``[7:9]``   u16BE  MaxCellVoltage      mV
+    ``[9:11]``  u16BE  MinCellVoltage      mV
+    ``[11]``    u8     MaxCVIndex          1-based cell position
+    ``[12]``    u8     MaxCVPacket         which battery holds it
+    ``[13]``    u8     MaxCVCluster        which cluster holds it
+    ``[14]``    u8     MinCVIndex          1-based cell position
+    ``[15]``    u8     MinCVPacket
+    ``[16]``    u8     MinCVCluster
+    ``[17]``    u8     MaxT                highest pack temperature, 50 C offset
+    ``[18]``    u8     MinT                lowest pack temperature, 50 C offset
+    ``[19]``    u8     MaxTIndex           which sensor
+    ``[20]``    u8     MaxTPacket
+    ``[21]``    u8     MaxTCluster
+    ``[22]``    u8     MinTIndex
+    ``[23]``    u8     MinTPacket
+    ``[24]``    u8     MinTCluster
+    ``[25:27]`` u16BE  DailyCharging       energy charged today, 0.1 kWh
+    ``[27:29]`` u16BE  DailyDischarging    energy discharged today, 0.1 kWh
+    ``[29]``    u8     SDStatus            SD-card status, values unknown
+    ==========  =====  ==================  ====================================
 
-    The two cell-position bytes were pinned by pairing summary frames with the
-    cell frames around them: whenever the extreme is unambiguous (the runner-up
-    is more than 20 mV away) they identify the right cell in 198 of 198 and 20
-    of 20 samples respectively. Below that margin they disagree occasionally,
-    which is expected -- the two frame types are snapshots taken moments apart,
-    so which cell is lowest can genuinely change between them.
+    The two cell-position bytes were pinned independently, before the app's
+    parser was read, by pairing summary frames with the cell frames around
+    them: whenever the extreme is unambiguous (the runner-up is more than
+    20 mV away) they identify the right cell in 198 of 198 and 20 of 20
+    samples. That they turned out to be MaxCVIndex and MinCVIndex is a useful
+    check on the method.
 
     The daily counters were pinned by differencing two captures 17 hours
     apart: at 23:34 two batteries displayed 0.2 kWh / 0.2 kWh and both read
-    ``00 02 00 02`` here; by 16:09 the next day, after a day of charging, the
-    same fields had moved independently of each other.
+    ``00 02 00 02`` here; by 16:09 the next day the fields had moved
+    independently of each other.
 
-    Bytes [6], [11]-[16], [19]-[24] and [29] are not decoded. They are mostly
-    small constants (0x01 / 0x02) that look like per-category status enums,
-    but every capture so far has the pack entirely fault-free, so there is
-    nothing to correlate them against.
+    ``Status`` and ``SDStatus`` are decoded but not interpreted. The app parses
+    both and displays neither on its summary page, and every capture has the
+    bank healthy with no SD card fitted, so there is nothing to correlate their
+    values against. They are reported raw rather than guessed at.
     """
     if len(payload) < 29:
         raise ValueError(f"expected at least 29 bytes, got {len(payload)}")
     plain = unmask(payload)
+
+    def u16(offset: int) -> int:
+        return struct.unpack_from(">H", plain, offset)[0]
+
+    def u8(offset: int) -> int | None:
+        """Optional because the shortest frames stop before the last byte."""
+        return plain[offset] if offset < len(plain) else None
+
     return Summary(
-        voltage=struct.unpack_from(">H", plain, 0)[0] / 10.0,
-        current=(struct.unpack_from(">H", plain, 2)[0] - CURRENT_ZERO) / 10.0,
-        soc=struct.unpack_from(">H", plain, 4)[0] / 10.0,
-        max_cell_mv=struct.unpack_from(">H", plain, 7)[0],
-        min_cell_mv=struct.unpack_from(">H", plain, 9)[0],
+        voltage=u16(0) / 10.0,
+        current=(u16(2) - CURRENT_ZERO) / 10.0,
+        soc=u16(4) / 10.0,
+        status_raw=u8(6),
+        max_cell_mv=u16(7),
+        min_cell_mv=u16(9),
         max_cell_index=plain[11],
+        max_cell_packet=u8(12),
+        max_cell_cluster=u8(13),
         min_cell_index=plain[14],
+        min_cell_packet=u8(15),
+        min_cell_cluster=u8(16),
         max_temperature=plain[17] - TEMPERATURE_OFFSET,
         min_temperature=plain[18] - TEMPERATURE_OFFSET,
-        daily_charge_kwh=struct.unpack_from(">H", plain, 25)[0] / 10.0,
-        daily_discharge_kwh=struct.unpack_from(">H", plain, 27)[0] / 10.0,
+        max_temp_index=u8(19),
+        max_temp_packet=u8(20),
+        max_temp_cluster=u8(21),
+        min_temp_index=u8(22),
+        min_temp_packet=u8(23),
+        min_temp_cluster=u8(24),
+        daily_charge_kwh=u16(25) / 10.0,
+        daily_discharge_kwh=u16(27) / 10.0,
+        sd_status=u8(29),
     )
 
 

@@ -199,6 +199,50 @@ class TestDecodeSummary:
         "00"
     )
 
+    def test_layout_matches_the_vendor_app_parser(self):
+        """Every byte the app reads, read the same way.
+
+        RTSummary.setData at 0x909370 loads these offsets and widths; the names
+        are its own, from RTSummary.toJson(). This asserts the whole map rather
+        than the handful of fields we happened to need, so a decode that drifts
+        away from the app's is caught even where nothing consumes the value.
+        """
+        s = decode_summary(_mask(self.PLAIN))
+        plain = self.PLAIN
+        assert s.voltage == int.from_bytes(plain[0:2], "big") / 10
+        assert s.soc == int.from_bytes(plain[4:6], "big") / 10
+        assert s.status_raw == plain[6]          # app field "Status"
+        assert s.max_cell_mv == int.from_bytes(plain[7:9], "big")
+        assert s.min_cell_mv == int.from_bytes(plain[9:11], "big")
+        assert (s.max_cell_index, s.max_cell_packet, s.max_cell_cluster) == (
+            plain[11], plain[12], plain[13],
+        )
+        assert (s.min_cell_index, s.min_cell_packet, s.min_cell_cluster) == (
+            plain[14], plain[15], plain[16],
+        )
+        assert (s.max_temp_index, s.max_temp_packet, s.max_temp_cluster) == (
+            plain[19], plain[20], plain[21],
+        )
+        assert (s.min_temp_index, s.min_temp_packet, s.min_temp_cluster) == (
+            plain[22], plain[23], plain[24],
+        )
+        assert s.sd_status == plain[29]          # app field "SDStatus"
+
+    def test_sd_status_is_reported_not_interpreted(self):
+        """Located, but its values are unknown and untestable here.
+
+        The app parses SDStatus and does not render it on the summary page, and
+        no capture has an SD card fitted, so the raw byte is all we can honestly
+        offer.
+        """
+        assert decode_summary(_mask(self.PLAIN)).sd_status == 0
+
+    def test_a_short_frame_leaves_the_trailing_fields_unset(self):
+        """Rather than raising or inventing a value."""
+        s = decode_summary(_mask(self.PLAIN[:29]))
+        assert s.sd_status is None
+        assert s.voltage > 0  # everything before it still decodes
+
     def test_cell_position_fields(self):
         """[11] and [14] are 1-based positions of the highest/lowest cell."""
         s = decode_summary(_mask(self.PLAIN))
