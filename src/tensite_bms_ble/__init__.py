@@ -40,7 +40,9 @@ from .alarms import (
     decode_alarms,
     unmapped_bits,
 )
+from .assembler import ReadingAssembler
 from .models import BatteryReading, ClusterReading, merge_readings
+from .stream import TensiteClusterStream
 from .protocol import (
     Frame,
     ParseStats,
@@ -61,7 +63,7 @@ from .protocol import (
     unmask,
 )
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "ALARM_SLOTS",
@@ -76,6 +78,8 @@ __all__ = [
     "DiscoveredCluster",
     "Frame",
     "ParseStats",
+    "ReadingAssembler",
+    "TensiteClusterStream",
     "MANUFACTURER_DATA_START",
     "MANUFACTURER_ID",
     "NOTIFY_CHAR",

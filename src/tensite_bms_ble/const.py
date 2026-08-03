@@ -31,6 +31,28 @@ DEFAULT_CONNECT_TIMEOUT = 20.0
 #: each battery's frames roughly every 5-6 s, so a short window can miss units.
 DEFAULT_LISTEN_TIMEOUT = 90.0
 
+# --- Streaming ---------------------------------------------------------------
+
+#: How often to send the link-test frame on a held connection.
+#:
+#: Not needed to sustain the stream: in the 2026-07-31 capture every battery
+#: kept emitting cell frames every ~5.1 s for 81 s after the app's last write,
+#: and frames arrive before the app writes anything at all. This is set near the
+#: ~79 s gap observed between the app's own writes, on the reasoning that the
+#: firmware may eventually drop an idle central and the app is the reference
+#: implementation.
+KEEPALIVE_INTERVAL = 60.0
+
+#: Floor on the gap between pushed updates. Frames arrive in bursts of several
+#: per second across the bank, and each update rewrites every entity's state.
+STREAM_UPDATE_THROTTLE = 2.0
+
+#: Reconnect backoff, doubling from the first to the second. Kept short at the
+#: start because most drops are transient, and capped so a battery that is
+#: genuinely gone is retried about once a minute rather than never.
+RECONNECT_BACKOFF_INITIAL = 5.0
+RECONNECT_BACKOFF_MAX = 60.0
+
 # --- Frame -------------------------------------------------------------------
 
 FRAME_START = 0x5E

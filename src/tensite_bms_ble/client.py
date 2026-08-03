@@ -21,8 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import struct
-from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -32,6 +30,7 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from bleak_retry_connector import establish_connection
 
+from .assembler import ReadingAssembler
 from .const import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_LISTEN_TIMEOUT,
@@ -39,29 +38,11 @@ from .const import (
     MANUFACTURER_ID,
     MIN_CONNECT_TIMEOUT,
     NOTIFY_CHAR,
-    MSG_CLASS_REALTIME,
     REQUEST_CHAR,
     SERIAL_MARKER,
-    MSG_RT_ALARM,
-    MSG_RT_CELLS,
-    MSG_RT_RELAY,
-    MSG_RT_SUMMARY,
-    MSG_RT_SWITCH,
-    MSG_RT_TOPOLOGY,
-    MSG_RT_TEMPERATURES,
 )
-from .models import BatteryReading, ClusterReading
-from .protocol import (
-    ParseStats,
-    build_request,
-    decode_alarm_bits,
-    decode_cells,
-    decode_routes,
-    decode_summary,
-    decode_topology,
-    decode_temperatures,
-    parse_frames,
-)
+from .models import ClusterReading
+from .protocol import build_request
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,12 +57,12 @@ __all__ = [
 
 #: A callable that returns a *connected* BleakClient. Supplied by the caller to
 #: override how connections are made; the default uses establish_connection.
-Connector = Callable[[BLEDevice], Awaitable[BleakClient]]
+#: Streaming callers are additionally passed a ``disconnected_callback`` keyword,
+#: since bleak only accepts one when the client is constructed.
+Connector = Callable[..., Awaitable[BleakClient]]
 
-
-def _complete(part: dict[str, Any]) -> bool:
-    """Whether a battery has reported everything a poll waits for."""
-    return bool(part.get("summary")) and bool(part.get("cell_voltages_mv"))
+#: Notified when a connection drops. bleak hands the client back.
+DisconnectCallback = Callable[[BleakClient], None]
 
 
 class TensiteError(Exception):
@@ -214,20 +195,39 @@ class TensiteClusterClient:
     def address(self) -> str:
         return self._device if isinstance(self._device, str) else self._device.address
 
-    async def _async_connect(self) -> BleakClient:
-        """Establish a connection with retries, using a fresh client."""
+    async def async_connect(
+        self, disconnected_callback: DisconnectCallback | None = None
+    ) -> BleakClient:
+        """Establish a connection with retries, using a fresh client.
+
+        Public because the streaming client connects the same way; a
+        ``BleakClient`` is never reused between connections, so every call
+        builds one.
+
+        Args:
+            disconnected_callback: Invoked when the link drops. bleak accepts
+                this only at construction time, so it cannot be attached later.
+        """
         if self._connector is not None:
             if isinstance(self._device, str):
                 raise TensiteError(
                     "a custom connector requires a resolved BLEDevice, not an address"
                 )
-            return await self._connector(self._device)
+            if disconnected_callback is None:
+                return await self._connector(self._device)
+            return await self._connector(
+                self._device, disconnected_callback=disconnected_callback
+            )
 
         if isinstance(self._device, str):
             # Standalone use with a bare address. CoreBluetooth on macOS will
             # only connect to a peripheral it has already discovered in this
             # process, so callers there should resolve a BLEDevice first.
-            client = BleakClient(self._device, timeout=self._connect_timeout)
+            client = BleakClient(
+                self._device,
+                disconnected_callback=disconnected_callback,
+                timeout=self._connect_timeout,
+            )
             await client.connect()
             return client
 
@@ -235,6 +235,7 @@ class TensiteClusterClient:
             BleakClient,
             self._device,
             self._serial or self.address,
+            disconnected_callback=disconnected_callback,
             timeout=self._connect_timeout,
         )
 
@@ -255,77 +256,18 @@ class TensiteClusterClient:
             TensiteNoDataError: connected, but no cell frames arrived in time.
         """
         timeout = listen_timeout if listen_timeout is not None else self._listen_timeout
-        buffer = bytearray()
-        stats = ParseStats()
-        # Each battery's state is assembled from several frame types that
-        # arrive independently, so accumulate per serial rather than replacing.
-        parts: dict[str, dict[str, Any]] = {}
-        #: Highest battery count any topology frame claimed this session.
-        roster = [0]
+        assembler = ReadingAssembler(
+            self.address, serial=self._serial, logger=self._logger
+        )
+        stats = assembler.stats
         enough = asyncio.Event()
 
         def _on_notify(_sender: Any, data: bytearray) -> None:
-            buffer.extend(data)
-            for frame in parse_frames(buffer, stats):
-                if frame.msg_class != MSG_CLASS_REALTIME or SERIAL_MARKER not in frame.serial:
-                    continue
-                part = parts.setdefault(
-                    frame.serial, {"position": frame.position}
-                )
-                part["position"] = frame.position
-                try:
-                    if frame.msg_id == MSG_RT_CELLS:
-                        part["cell_voltages_mv"] = tuple(decode_cells(frame.payload))
-                        part["cells_updated_at"] = datetime.now(tz=timezone.utc)
-                    elif frame.msg_id == MSG_RT_SUMMARY:
-                        part["summary"] = decode_summary(frame.payload)
-                    elif frame.msg_id == MSG_RT_TEMPERATURES:
-                        part["temperatures"] = tuple(
-                            decode_temperatures(frame.payload)
-                        )
-                    elif frame.msg_id == MSG_RT_ALARM and len(frame.payload) == 8:
-                        part["alarm_bits"] = decode_alarm_bits(frame.payload)
-                    elif frame.msg_id == MSG_RT_RELAY:
-                        part["relay_routes"] = decode_routes(frame.payload)
-                    elif frame.msg_id == MSG_RT_TOPOLOGY:
-                        # The roster: how many batteries the sender knows of.
-                        # Only the master sends the long form. Recorded rather
-                        # than acted on -- see ClusterReading.roster_count.
-                        topology = decode_topology(frame.payload)
-                        if topology.count > roster[0]:
-                            roster[0] = topology.count
-                            self._logger.debug(
-                                "%s: topology says %d batteries (%s readable)",
-                                frame.serial,
-                                topology.count,
-                                len(topology.serials),
-                            )
-                    elif frame.msg_id == MSG_RT_SWITCH:
-                        # is_master comes from the position word, not from here:
-                        # both agree, and position is present on every frame.
-                        part["switch_routes"] = decode_routes(frame.payload)
-                    else:
-                        stats.note_unhandled(frame.msg_id)
-                        continue
-                except (ValueError, IndexError, struct.error):
-                    self._logger.debug(
-                        "%s: malformed type-0x%02x payload (%d bytes), skipping",
-                        frame.serial,
-                        frame.msg_type,
-                        len(frame.payload),
-                    )
-                    continue
+            assembler.feed(bytes(data))
+            if expect and assembler.complete_count() >= expect:
+                enough.set()
 
-                # A battery only counts as complete once it has *both* the pack
-                # summary and its cells. Requiring only one of them exits far
-                # too early: type-0x00 summaries arrive several times more
-                # often than type-0x05 cell frames, so `expect` would be
-                # satisfied by summaries alone and return readings with no cell
-                # data at all.
-                if expect and sum(1 for p in parts.values() if _complete(p)) >= expect:
-                    enough.set()
-
-        client = await self._async_connect()
+        client = await self.async_connect()
         try:
             await client.start_notify(NOTIFY_CHAR, _on_notify)
 
@@ -349,22 +291,13 @@ class TensiteClusterClient:
             except Exception:  # noqa: BLE001 -- ditto
                 self._logger.debug("%s: disconnect failed, ignoring", self.address)
 
-        # Partial batteries are still returned -- a unit that sent a summary but
-        # no cells before the timeout is more useful than nothing.
-        batteries = {
-            serial: BatteryReading(serial=serial, **part)
-            for serial, part in parts.items()
-            if part.get("summary") or part.get("cell_voltages_mv")
-        }
-        if not batteries:
+        reading = assembler.reading()
+        if reading is None:
             raise TensiteNoDataError(
                 f"{self.address}: connected but no battery frames arrived within "
                 f"{timeout:.0f}s"
             )
 
-        master = next(
-            (s for s, b in batteries.items() if b.is_master), self._serial
-        )
         if stats.rejected:
             # Not fatal on its own -- a truncated frame at the tail of a
             # session is normal -- but a sustained ratio means the parser and
@@ -379,10 +312,4 @@ class TensiteClusterClient:
                 f"crc={stats.crc_failures} len={stats.length_mismatches} "
                 f"escape={stats.bad_escapes} truncated={stats.truncated}",
             )
-        return ClusterReading(
-            roster_count=roster[0] or None,
-            address=self.address,
-            master_serial=master,
-            batteries=batteries,
-            stats=stats,
-        )
+        return reading

@@ -57,6 +57,36 @@ for serial, battery in reading.batteries.items():
 `ClusterReading` → `BatteryReading` mirrors the hardware: one gateway, several
 batteries, sixteen cells each.
 
+### Streaming
+
+`async_read` connects, listens and disconnects — fine for a one-shot read, but
+it pays ~12 s of connection setup for a few seconds of data. The gateway streams
+unprompted once notifications are enabled, so a held connection gets everything
+the vendor app sees:
+
+```python
+from tensite_bms_ble import TensiteClusterStream
+
+stream = TensiteClusterStream(
+    master.device,
+    serial=master.serial,
+    on_update=lambda reading: print(reading.battery_count, reading.min_cell_mv),
+)
+await stream.async_start()          # returns once connected
+...
+await stream.async_stop()           # frees the gateway for other apps
+```
+
+`on_update` fires as frames arrive — every battery in the bank reports cell
+voltages about every 5 s, concurrently — coalesced to at most one call per
+`update_throttle` seconds (default 2). A dropped connection is retried with
+backoff until `async_stop`.
+
+Measured on a 182-second capture of the vendor app: all four batteries emitted
+cell frames at a median 5.1 s gap, and kept doing so for 81 s after the app's
+last write. The stream sustains itself; the link-test frame sent every 60 s is
+precautionary, matching the ~79 s gap between the app's own writes.
+
 ## Home Assistant compatibility
 
 Bluetooth work inside Home Assistant has rules, and this library follows them
@@ -103,9 +133,13 @@ The CLI retries (`--scan-attempts`); library callers should too.
 latter returns CoreBluetooth's cached GATT Device Name, which is `ESP32` for
 every unit in the bank. `async_discover_clusters` handles this.
 
-**The bank is round-robined.** Each battery's frames arrive roughly every
-5–6 s, so a short window can miss units. Pass `expect=` to return as soon as
-the whole bank has reported instead of waiting out the timeout.
+**Every battery reports concurrently, not in rotation.** Each unit sends its own
+cell frames roughly every 5 s, all of them at once — the bank is not
+round-robined, which earlier notes here claimed. A short listening window can
+still miss units simply because it is shorter than that cadence. With
+`async_read`, pass `expect=` to return as soon as the whole bank has reported
+instead of waiting out the timeout; with `TensiteClusterStream` the question does
+not arise.
 
 ## What is and isn't decoded
 
